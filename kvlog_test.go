@@ -65,10 +65,10 @@ func TestBasic(t *testing.T) {
 		t.Errorf("error on GetAt: expecting %q, got %q\n", expect, val)
 	}
 
-	// NewIterator
-	it, err := kdb.NewIterator("foo")
+	// GetIterator
+	it, err := kdb.GetIterator("foo")
 	if err != nil {
-		t.Errorf("error on NewIterator: %s\n", err.Error())
+		t.Errorf("error on GetIterator: %s\n", err.Error())
 	}
 	defer it.Close()
 	kvlog := it.Next()

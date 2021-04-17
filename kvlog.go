@@ -234,11 +234,11 @@ func (kdb *KDB) GetAt(key string, ts int64) (string, error) {
 	return kdb.findValue(kvlog.vid)
 }
 
-// NewIterator returns an Interator to fetch successive KVLog records,
+// GetIterator returns an Interator to fetch successive KVLog records,
 // in reverse timestamp order (i.e. latest first).
 // The caller is responsible for calling Close() on the returned
 // iterator once finished.
-func (kdb *KDB) NewIterator(key string) (*Iterator, error) {
+func (kdb *KDB) GetIterator(key string) (*Iterator, error) {
 	filter := bson.D{
 		primitive.E{Key: "k", Value: key},
 	}
