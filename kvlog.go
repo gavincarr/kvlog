@@ -14,14 +14,19 @@ import (
 )
 
 const (
+	defaultURI           = "mongodb://localhost/"
 	defaultDBName        = "kvlog"
 	maxInlineValueLength = 200 // max number of characters in value to store inline in kvlog.v
 )
 
 // First-pass implementation: mongodb
+type KDBOptions struct {
+	URI    string
+	DBName string
+}
+
 type KDB struct {
 	Ctx    context.Context
-	Uri    string
 	Client *mongo.Client
 	DB     *mongo.Database
 	KC     *mongo.Collection // kvlog collection
@@ -40,8 +45,31 @@ type Value struct {
 	V  string `bson:"v"`
 }
 
-func newKDBNamed(ctx context.Context, uri, dbname string) (*KDB, error) {
-	client, err := mongo.NewClient(options.Client().ApplyURI(uri))
+func createIndexes(ctx context.Context, coll *mongo.Collection) error {
+	// db.kvlog.createIndex({ k:1, ts:-1 }, { unique:true })
+	model := mongo.IndexModel{
+		Keys:    bson.D{{Key: "k", Value: 1}, {Key: "ts", Value: -1}},
+		Options: options.Index().SetName("k_ts").SetUnique(true),
+	}
+	_, err := coll.Indexes().CreateOne(ctx, model, nil)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// NewKDBOptions creates a new connection to the kvlog database using
+// the ctx context and the given options, and returns *KDB. The caller is
+// responsible for doing a Disconnect(ctx) on *KDB.client when completed.
+func NewKDBOptions(ctx context.Context, opts KDBOptions) (*KDB, error) {
+	if opts.URI == "" {
+		opts.URI = defaultURI
+	}
+	if opts.DBName == "" {
+		opts.DBName = defaultDBName
+	}
+
+	client, err := mongo.NewClient(options.Client().ApplyURI(opts.URI))
 	if err != nil {
 		return nil, err
 	}
@@ -51,19 +79,25 @@ func newKDBNamed(ctx context.Context, uri, dbname string) (*KDB, error) {
 		return nil, err
 	}
 
-	db := client.Database(dbname)
+	db := client.Database(opts.DBName)
 	kc := db.Collection("kvlog")
 	vc := db.Collection("value")
 
-	kdb := KDB{Ctx: ctx, Uri: uri, Client: client, DB: db, KC: kc, VC: vc}
+	// Check required indexes exist
+	err = createIndexes(ctx, kc)
+	if err != nil {
+		return nil, err
+	}
+
+	kdb := KDB{Ctx: ctx, Client: client, DB: db, KC: kc, VC: vc}
 	return &kdb, nil
 }
 
-// NewKDB creates a new connection to the kvlog database at uri,
-// using the ctx context, and returns *DB. The caller is responsible
-// for doing a Disconnect on *DB.client (with ctx) when completed.
-func NewKDB(ctx context.Context, uri string) (*KDB, error) {
-	return newKDBNamed(ctx, uri, defaultDBName)
+// NewKDB creates a new connection to the kvlog database using the ctx
+// context and default options, and returns *KDB. The caller is
+// responsible for doing a Disconnect(ctx) on *KDB.client when completed.
+func NewKDB(ctx context.Context) (*KDB, error) {
+	return NewKDBOptions(ctx, KDBOptions{})
 }
 
 // findKVLogLatest finds the latest kvlog entry for key
