@@ -26,23 +26,29 @@ type KDBOptions struct {
 }
 
 type KDB struct {
-	Ctx    context.Context
-	Client *mongo.Client
-	DB     *mongo.Database
-	KC     *mongo.Collection // kvlog collection
-	VC     *mongo.Collection // value collection
+	ctx    context.Context
+	client *mongo.Client
+	db     *mongo.Database
+	kc     *mongo.Collection // kvlog collection
+	vc     *mongo.Collection // value collection
 }
 
 type KVLog struct {
-	K   string `bson:"k"`
+	Key string `bson:"k"`
 	TS  int64  `bson:"ts"`
-	V   string `bson:"v"`
-	VID string `bson:"vid"`
+	Val string `bson:"v"`
+	vid string `bson:"vid"`
 }
 
 type Value struct {
-	ID string `bson:"_id"`
-	V  string `bson:"v"`
+	ID  string `bson:"_id"`
+	Val string `bson:"v"`
+}
+
+type Iterator struct {
+	kdb    *KDB
+	cursor *mongo.Cursor
+	err    error
 }
 
 func createIndexes(ctx context.Context, coll *mongo.Collection) error {
@@ -60,7 +66,7 @@ func createIndexes(ctx context.Context, coll *mongo.Collection) error {
 
 // NewKDBOptions creates a new connection to the kvlog database using
 // the ctx context and the given options, and returns *KDB. The caller is
-// responsible for doing a Disconnect(ctx) on *KDB.client when completed.
+// responsible for calling KDB.Disconnect when completed.
 func NewKDBOptions(ctx context.Context, opts KDBOptions) (*KDB, error) {
 	if opts.URI == "" {
 		opts.URI = defaultURI
@@ -89,7 +95,7 @@ func NewKDBOptions(ctx context.Context, opts KDBOptions) (*KDB, error) {
 		return nil, err
 	}
 
-	kdb := KDB{Ctx: ctx, Client: client, DB: db, KC: kc, VC: vc}
+	kdb := KDB{ctx: ctx, client: client, db: db, kc: kc, vc: vc}
 	return &kdb, nil
 }
 
@@ -108,7 +114,7 @@ func (kdb *KDB) findKVLogLatest(key string) (*KVLog, error) {
 	}
 	options := options.FindOne()
 	options.SetSort(bson.M{"ts": -1})
-	err := kdb.KC.FindOne(kdb.Ctx, filter, options).Decode(&kvlog)
+	err := kdb.kc.FindOne(kdb.ctx, filter, options).Decode(&kvlog)
 	if err != nil {
 		return nil, err
 	}
@@ -126,22 +132,22 @@ func (kdb *KDB) findKVLogAfter(key string, ts int64) (*KVLog, error) {
 	}
 	options := options.FindOne()
 	options.SetSort(bson.M{"ts": 1})
-	err := kdb.KC.FindOne(kdb.Ctx, filter, options).Decode(&kvlog)
+	err := kdb.kc.FindOne(kdb.ctx, filter, options).Decode(&kvlog)
 	if err != nil {
 		return nil, err
 	}
 	return &kvlog, nil
 }
 
-// findValue finds value where _id == kvlog.VID
+// findValue finds value where _id == kvlog.vid
 func (kdb *KDB) findValue(vid string) (string, error) {
 	value := Value{}
 	filter := bson.D{primitive.E{Key: "_id", Value: vid}}
-	err := kdb.VC.FindOne(kdb.Ctx, filter).Decode(&value)
+	err := kdb.vc.FindOne(kdb.ctx, filter).Decode(&value)
 	if err != nil {
 		return "", err
 	}
-	return value.V, nil
+	return value.Val, nil
 }
 
 // Set sets the current value for key to val (if not already val)
@@ -161,8 +167,8 @@ func (kdb *KDB) Set(key, val string) error {
 		if err != nil {
 			// vid not found - insert
 			//fmt.Printf("value for %q not found - inserting\n", val)
-			vrec := Value{ID: vid, V: val}
-			_, err := kdb.VC.InsertOne(kdb.Ctx, vrec)
+			vrec := Value{ID: vid, Val: val}
+			_, err := kdb.vc.InsertOne(kdb.ctx, vrec)
 			if err != nil {
 				return err
 			}
@@ -177,26 +183,26 @@ func (kdb *KDB) Set(key, val string) error {
 		return err
 	}
 	if err != mongo.ErrNoDocuments {
-		if vid != "" && kvlog.VID == vid {
+		if vid != "" && kvlog.vid == vid {
 			// latest kvlog record matches, we're done
 			//fmt.Printf("latest kvlog for %q found and vid matches\n", key)
 			return nil
-		} else if vid == "" && kvlog.V == val {
+		} else if vid == "" && kvlog.Val == val {
 			// latest kvlog record matches, we're done
 			//fmt.Printf("latest kvlog for %q found and v matches\n", key)
 			return nil
 		}
 	}
 
-	// No kvlog record found, or VIDs don't match - do an insert
+	// No kvlog record found, or vids don't match - do an insert
 	//fmt.Printf("kvlog for %q not found or out of date - inserting\n", key)
-	kvlog = &KVLog{K: key, TS: time.Now().UnixNano()}
+	kvlog = &KVLog{Key: key, TS: time.Now().UnixNano()}
 	if vid == "" {
-		kvlog.V = val
+		kvlog.Val = val
 	} else {
-		kvlog.VID = vid
+		kvlog.vid = vid
 	}
-	_, err = kdb.KC.InsertOne(kdb.Ctx, *kvlog)
+	_, err = kdb.kc.InsertOne(kdb.ctx, *kvlog)
 	if err != nil {
 		return err
 	}
@@ -210,20 +216,81 @@ func (kdb *KDB) Get(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if kvlog.VID == "" {
-		return kvlog.V, nil
+	if kvlog.vid == "" {
+		return kvlog.Val, nil
 	}
-	return kdb.findValue(kvlog.VID)
+	return kdb.findValue(kvlog.vid)
 }
 
-// Get fetches the first value for key after ts
+// GetAt fetches the first value for key after ts
 func (kdb *KDB) GetAt(key string, ts int64) (string, error) {
 	kvlog, err := kdb.findKVLogAfter(key, ts)
 	if err != nil {
 		return "", err
 	}
-	if kvlog.VID == "" {
-		return kvlog.V, nil
+	if kvlog.vid == "" {
+		return kvlog.Val, nil
 	}
-	return kdb.findValue(kvlog.VID)
+	return kdb.findValue(kvlog.vid)
+}
+
+// NewIterator returns an Interator to fetch successive KVLog records,
+// in reverse timestamp order (i.e. latest first).
+// The caller is responsible for calling Close() on the returned
+// iterator once finished.
+func (kdb *KDB) NewIterator(key string) (*Iterator, error) {
+	filter := bson.D{
+		primitive.E{Key: "k", Value: key},
+	}
+	options := options.Find()
+	options.SetSort(bson.M{"ts": -1})
+	cursor, err := kdb.kc.Find(kdb.ctx, filter, options)
+	if err != nil {
+		return nil, err
+	}
+	it := Iterator{kdb: kdb, cursor: cursor}
+	return &it, nil
+}
+
+func (kdb *KDB) Disconnect() {
+	kdb.client.Disconnect(kdb.ctx)
+}
+
+// Next returns the next KVLog record from the iterator, or nil
+// if no records remain, or an error occurred (which will be
+// available via Iterator.Err()).
+func (it *Iterator) Next() *KVLog {
+	if it.cursor.Next(it.kdb.ctx) {
+		kvlog := KVLog{}
+		err := it.cursor.Decode(&kvlog)
+		if err != nil {
+			it.err = err
+			return nil
+		}
+		if kvlog.Val == "" {
+			val, err := it.kdb.findValue(kvlog.vid)
+			if err != nil {
+				it.err = err
+				return nil
+			}
+			kvlog.Val = val
+		}
+		return &kvlog
+	}
+	if err := it.cursor.Err(); err != nil {
+		it.err = err
+		return nil
+	}
+	return nil
+}
+
+// Close marks the iterator as closed. Next() should not be
+// called again after the iterator has been closed.
+func (it *Iterator) Close() {
+	it.cursor.Close(it.kdb.ctx)
+}
+
+// Err returns the most recent error received from the iterator
+func (it *Iterator) Err() error {
+	return it.err
 }
