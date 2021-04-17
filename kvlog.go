@@ -13,7 +13,10 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const defaultDBName = "kvlog"
+const (
+	defaultDBName        = "kvlog"
+	maxInlineValueLength = 200 // max number of characters in value to store inline in kvlog.v
+)
 
 // First-pass implementation: mongodb
 type KDB struct {
@@ -28,6 +31,7 @@ type KDB struct {
 type KVLog struct {
 	K   string `bson:"k"`
 	TS  int64  `bson:"ts"`
+	V   string `bson:"v"`
 	VID string `bson:"vid"`
 }
 
@@ -62,8 +66,8 @@ func NewKDB(ctx context.Context, uri string) (*KDB, error) {
 	return newKDBNamed(ctx, uri, defaultDBName)
 }
 
-// findLatestKVLog finds the latest kvlog entry for key
-func (kdb *KDB) findLatestKVLog(key string) (*KVLog, error) {
+// findKVLogLatest finds the latest kvlog entry for key
+func (kdb *KDB) findKVLogLatest(key string) (*KVLog, error) {
 	kvlog := KVLog{}
 	filter := bson.D{
 		primitive.E{Key: "k", Value: key},
@@ -109,41 +113,55 @@ func (kdb *KDB) findValue(vid string) (string, error) {
 // Set sets the current value for key to val (if not already val)
 func (kdb *KDB) Set(key, val string) error {
 	val = strings.TrimSpace(val)
-	hash := sha1.Sum([]byte(val))
-	vid := hex.EncodeToString(hash[:])
+	vlen := len(val)
 
-	// find or insert value record
-	filter := bson.D{primitive.E{Key: "_id", Value: vid}}
-	res := kdb.VC.FindOne(kdb.Ctx, filter)
-	if res.Err() != nil {
-		if res.Err() != mongo.ErrNoDocuments {
-			return res.Err()
-		}
-		// vid not found - insert
-		//fmt.Printf("value for %q not found - inserting\n", val)
-		vrec := Value{ID: vid, V: val}
-		_, err := kdb.VC.InsertOne(kdb.Ctx, vrec)
-		if err != nil {
+	vid := ""
+	if vlen > maxInlineValueLength {
+		// find or insert value record
+		hash := sha1.Sum([]byte(val))
+		vid = hex.EncodeToString(hash[:])
+		_, err := kdb.findValue(vid)
+		if err != nil && err != mongo.ErrNoDocuments {
 			return err
 		}
-	} else {
-		//fmt.Printf("value for %q found\n", val)
+		if err != nil {
+			// vid not found - insert
+			//fmt.Printf("value for %q not found - inserting\n", val)
+			vrec := Value{ID: vid, V: val}
+			_, err := kdb.VC.InsertOne(kdb.Ctx, vrec)
+			if err != nil {
+				return err
+			}
+			//} else {
+			//fmt.Printf("value for %q found\n", val)
+		}
 	}
 
 	// find or insert kvlog record
-	kvlog, err := kdb.findLatestKVLog(key)
+	kvlog, err := kdb.findKVLogLatest(key)
 	if err != nil && err != mongo.ErrNoDocuments {
 		return err
 	}
-	if err != mongo.ErrNoDocuments && kvlog.VID == vid {
-		// latest kvlog record matches, we're done
-		//fmt.Printf("latest kvlog for %q found and vid matches\n", key)
-		return nil
+	if err != mongo.ErrNoDocuments {
+		if vid != "" && kvlog.VID == vid {
+			// latest kvlog record matches, we're done
+			//fmt.Printf("latest kvlog for %q found and vid matches\n", key)
+			return nil
+		} else if vid == "" && kvlog.V == val {
+			// latest kvlog record matches, we're done
+			//fmt.Printf("latest kvlog for %q found and v matches\n", key)
+			return nil
+		}
 	}
 
 	// No kvlog record found, or VIDs don't match - do an insert
 	//fmt.Printf("kvlog for %q not found or out of date - inserting\n", key)
-	kvlog = &KVLog{K: key, TS: time.Now().UnixNano(), VID: vid}
+	kvlog = &KVLog{K: key, TS: time.Now().UnixNano()}
+	if vid == "" {
+		kvlog.V = val
+	} else {
+		kvlog.VID = vid
+	}
 	_, err = kdb.KC.InsertOne(kdb.Ctx, *kvlog)
 	if err != nil {
 		return err
@@ -154,9 +172,12 @@ func (kdb *KDB) Set(key, val string) error {
 
 // Get fetches the latest value for key
 func (kdb *KDB) Get(key string) (string, error) {
-	kvlog, err := kdb.findLatestKVLog(key)
+	kvlog, err := kdb.findKVLogLatest(key)
 	if err != nil {
 		return "", err
+	}
+	if kvlog.VID == "" {
+		return kvlog.V, nil
 	}
 	return kdb.findValue(kvlog.VID)
 }
@@ -166,6 +187,9 @@ func (kdb *KDB) GetAt(key string, ts int64) (string, error) {
 	kvlog, err := kdb.findKVLogAfter(key, ts)
 	if err != nil {
 		return "", err
+	}
+	if kvlog.VID == "" {
+		return kvlog.V, nil
 	}
 	return kdb.findValue(kvlog.VID)
 }
