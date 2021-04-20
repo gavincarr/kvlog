@@ -2,6 +2,7 @@ package kvlog
 
 import (
 	"context"
+	"io/ioutil"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ func TestBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Set/Get tests with []values
 	val, err := kdb.GetAt("foo", ts)
 	if err != nil && err != mongo.ErrNoDocuments {
 		t.Fatalf("error on GetAt: %s\n", err.Error())
@@ -40,19 +42,37 @@ func TestBasic(t *testing.T) {
 		t.Fatal("unexpected success error on initial GetAt - documents found?\n")
 	}
 
+	k := "foo"
 	for i, v := range values {
-		err = kdb.Set("foo", v)
+		err = kdb.Set(k, v)
 		if err != nil {
-			t.Errorf("error on Set%d (%s): %s\n", i, v, err.Error())
+			t.Errorf("error on Set%d (%s/%s): %s\n", i, k, v, err.Error())
 		}
 
-		val, err = kdb.Get("foo")
+		val, err = kdb.Get(k)
 		if err != nil {
-			t.Errorf("error on Get%d (%s): %s\n", i, v, err.Error())
+			t.Errorf("error on Get%d (%s/%s): %s\n", i, k, v, err.Error())
 		}
 		if val != v {
-			t.Errorf("error on Get%d: expecting %q, got %q\n", i, v, val)
+			t.Errorf("error on Get%d (%s): expecting %q, got %q\n", i, k, v, val)
 		}
+	}
+
+	// Set/Get test with a long string
+	k = "test"
+	b, err := ioutil.ReadFile("kvlog_test.go")
+	v := string(b)
+	err = kdb.Set("test", v)
+	if err != nil {
+		t.Errorf("error on long Set (%s): %s\n", v, err.Error())
+	}
+	val, err = kdb.Get(k)
+	if err != nil {
+		t.Errorf("error on long Get (%s): %s\n", k, err.Error())
+	}
+	if val != v {
+		t.Errorf("error on log Get (%s) - content mismatch (got %dB, expected %dB\n",
+			k, len(val), len(v))
 	}
 
 	// GetAt

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
-	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -37,7 +36,7 @@ type KVLog struct {
 	Key string `bson:"k"`
 	TS  int64  `bson:"ts"`
 	Val string `bson:"v"`
-	vid string `bson:"vid"`
+	Vid string `bson:"vid"`
 }
 
 type Value struct {
@@ -139,7 +138,7 @@ func (kdb *KDB) findKVLogAfter(key string, ts int64) (*KVLog, error) {
 	return &kvlog, nil
 }
 
-// findValue finds value where _id == kvlog.vid
+// findValue finds value where _id == kvlog.Vid
 func (kdb *KDB) findValue(vid string) (string, error) {
 	value := Value{}
 	filter := bson.D{primitive.E{Key: "_id", Value: vid}}
@@ -152,7 +151,6 @@ func (kdb *KDB) findValue(vid string) (string, error) {
 
 // Set sets the current value for key to val (if not already val)
 func (kdb *KDB) Set(key, val string) error {
-	val = strings.TrimSpace(val)
 	vlen := len(val)
 
 	vid := ""
@@ -183,7 +181,7 @@ func (kdb *KDB) Set(key, val string) error {
 		return err
 	}
 	if err != mongo.ErrNoDocuments {
-		if vid != "" && kvlog.vid == vid {
+		if vid != "" && kvlog.Vid == vid {
 			// latest kvlog record matches, we're done
 			//fmt.Printf("latest kvlog for %q found and vid matches\n", key)
 			return nil
@@ -200,7 +198,7 @@ func (kdb *KDB) Set(key, val string) error {
 	if vid == "" {
 		kvlog.Val = val
 	} else {
-		kvlog.vid = vid
+		kvlog.Vid = vid
 	}
 	_, err = kdb.kc.InsertOne(kdb.ctx, *kvlog)
 	if err != nil {
@@ -216,10 +214,10 @@ func (kdb *KDB) Get(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if kvlog.vid == "" {
+	if kvlog.Vid == "" {
 		return kvlog.Val, nil
 	}
-	return kdb.findValue(kvlog.vid)
+	return kdb.findValue(kvlog.Vid)
 }
 
 // GetAt fetches the first value for key after ts
@@ -228,10 +226,10 @@ func (kdb *KDB) GetAt(key string, ts int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if kvlog.vid == "" {
+	if kvlog.Vid == "" {
 		return kvlog.Val, nil
 	}
-	return kdb.findValue(kvlog.vid)
+	return kdb.findValue(kvlog.Vid)
 }
 
 // GetIterator returns an Interator to fetch successive KVLog records,
@@ -268,7 +266,7 @@ func (it *Iterator) Next() *KVLog {
 			return nil
 		}
 		if kvlog.Val == "" {
-			val, err := it.kdb.findValue(kvlog.vid)
+			val, err := it.kdb.findValue(kvlog.Vid)
 			if err != nil {
 				it.err = err
 				return nil
